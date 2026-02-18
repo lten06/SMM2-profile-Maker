@@ -6,7 +6,8 @@
     "outDir": "dist",
     "rootDir": ".",
     "esModuleInterop": true,
-    "strict": true
+    "strict": true,
+    "types": ["node"]
   },
   "include": ["index.ts"]
 }
