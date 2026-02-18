@@ -11,6 +11,8 @@
 import * as http from "http";
 import { URL } from "url";
 import * as crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
 
 type TopCourse = {
   title: string;
@@ -36,8 +38,61 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 // In-memory "DB"
 const profiles = new Map<string, Profile>(); // key: handle
 
-// Seed example (optional)
-seedExample();
+// ---- Persistence (JSON file) ----
+const DATA_DIR = process.env.DATA_DIR || "/var/data";
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const DATA_FILE = path.join(DATA_DIR, "profiles.json");
+// 書き込みをまとめる（連打で毎回書くと重い＆壊れやすい）
+let saveTimer: NodeJS.Timeout | null = null;
+
+function serializeProfiles(): Profile[] {
+  return Array.from(profiles.values());
+}
+
+function hydrateProfiles(list: Profile[]) {
+  profiles.clear();
+  for (const p of list) {
+    if (!p?.handle) continue;
+    profiles.set(p.handle, p);
+  }
+}
+
+// atomic write: 一時ファイルに書いてから置き換える（途中で落ちても壊れにくい）
+function saveProfilesSoon() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    try {
+      const tmp = DATA_FILE + ".tmp";
+      const json = JSON.stringify(serializeProfiles(), null, 2);
+      fs.writeFileSync(tmp, json, "utf8");
+      fs.renameSync(tmp, DATA_FILE);
+    } catch (e) {
+      console.error("Failed to save profiles:", e);
+    }
+  }, 150); // 0.15秒まとめ
+}
+
+function loadProfilesFromDisk() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return false;
+    const raw = fs.readFileSync(DATA_FILE, "utf8");
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return false;
+    hydrateProfiles(list);
+    return true;
+  } catch (e) {
+    console.error("Failed to load profiles:", e);
+    return false;
+  }
+}
+
+// 起動時にディスクから復元。無ければサンプル投入（任意）
+const loaded = loadProfilesFromDisk();
+if (!loaded) {
+  seedExample(); // いらなければ消してOK
+  saveProfilesSoon(); // 初回のサンプルも保存しておく
+}
 
 function seedExample() {
   const now = Date.now();
@@ -855,6 +910,7 @@ const server = http.createServer(async (req, res) => {
       };
 
       profiles.set(handle, p);
+      saveProfilesSoon();
 
       // ★ この端末の「本人」として cookie 保存
       setCookie(res, "mm_handle", handle);
@@ -892,22 +948,33 @@ const server = http.createServer(async (req, res) => {
       const myHandle = cookies["mm_handle"];
       const mySecret = cookies["mm_secret"];
 
-      if (!myHandle || !mySecret) return sendHtml(res, layout("編集できません", `<p>権限がありません。</p>`), 403);
+      if (!myHandle || !mySecret) {
+        return sendHtml(res, layout("編集できません", `<p>権限がありません。</p>`), 403);
+      }
 
       const p = profiles.get(myHandle);
-      if (!p || p.editSecret !== mySecret) return sendHtml(res, layout("編集できません", `<p>権限がありません。</p>`), 403);
+      if (!p || p.editSecret !== mySecret) {
+        return sendHtml(res, layout("編集できません", `<p>権限がありません。</p>`), 403);
+      }
 
       const body = await readBody(req);
       const params = new URLSearchParams(body);
 
       const name = (params.get("name") ?? "").trim();
-      const makerId = (params.get("makerId") ?? "").trim();
+
+      const makerIdRaw = (params.get("makerId") ?? "").trim();
+      const makerId = normalizeMakerId(makerIdRaw);
+
+      // ★ これが必須（あなたの貼ったコードに無い）
       const bio = (params.get("bio") ?? "").trim();
       const tags = parseSelectedTags(params);
 
-      if (!name || !makerId) return badRequest(res, "必須項目が足りません。");
+      if (!name) return badRequest(res, "表示名が必要です。");
+      if (!makerId) return badRequest(res, "職人IDが必要です。");
+      if (!isValidMakerId(makerId)) {
+        return badRequest(res, "職人IDの形式が正しくありません。例: ABC-123-DEF");
+      }
 
-      // Top10
       const top10: TopCourse[] = [];
       for (let i = 1; i <= 10; i++) {
         const title = (params.get(`c_title_${i}`) ?? "").trim();
@@ -922,11 +989,11 @@ const server = http.createServer(async (req, res) => {
       p.tags = tags;
       p.top10 = top10;
       p.updatedAt = Date.now();
+      saveProfilesSoon();
 
       res.writeHead(303, { Location: `/u/${encodeURIComponent(p.handle)}` });
       return res.end();
     }
-
 
 
     return notFound(res);
