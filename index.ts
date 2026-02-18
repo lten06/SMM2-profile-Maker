@@ -39,8 +39,22 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 const profiles = new Map<string, Profile>(); // key: handle
 
 // ---- Persistence (JSON file) ----
-const DATA_DIR = process.env.DATA_DIR || "/var/data";
-fs.mkdirSync(DATA_DIR, { recursive: true });
+function ensureWritableDir(preferred: string) {
+  try {
+    fs.mkdirSync(preferred, { recursive: true });
+    fs.accessSync(preferred, fs.constants.W_OK);
+    return preferred;
+  } catch {
+    const fallback = path.join(process.cwd(), "data");
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  }
+}
+
+const DATA_DIR = ensureWritableDir(
+  process.env.DATA_DIR || (process.env.RENDER ? "/var/data" : path.join(process.cwd(), "data"))
+);
+
 const DATA_FILE = path.join(DATA_DIR, "profiles.json");
 // 書き込みをまとめる（連打で毎回書くと重い＆壊れやすい）
 let saveTimer: NodeJS.Timeout | null = null;
